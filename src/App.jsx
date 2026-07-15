@@ -355,9 +355,6 @@ export default function App() {
                   })}
                 </ul>
               )}
-              <p className="results-note">
-                AI-suggested matches — confirm the details are correct after citing.
-              </p>
             </div>
           )}
 
@@ -393,10 +390,6 @@ export default function App() {
           </div>
         )}
 
-        <p className="disclaimer">
-          AI-generated citations may occasionally contain errors — always
-          double-check against your source and style guide.
-        </p>
       </main>
 
       <footer className="site-footer">
