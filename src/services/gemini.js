@@ -1,13 +1,16 @@
 import {
-  GEMINI_API_KEY,
+  GEMINI_API_KEYS,
   GEMINI_MODEL,
   GEMINI_FALLBACK_MODELS,
 } from '../config.js'
 
-const ENDPOINT = (model) =>
-  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`
+const ENDPOINT = (model, key) =>
+  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// Rotates which key we try FIRST on each call, so load spreads across all keys.
+let keyRotation = 0
 
 // ---------------------------------------------------------------------------
 // PUBLIC API
@@ -92,22 +95,41 @@ async function runGemini(prompt, parseFn) {
     generationConfig: { temperature: 0.25, responseMimeType: 'application/json' },
   }
 
+  if (GEMINI_API_KEYS.length === 0)
+    throw new Error(
+      'No Gemini API key configured. Set VITE_GEMINI_API_KEY in your .env / build secret.'
+    )
+
   const models = [GEMINI_MODEL, ...GEMINI_FALLBACK_MODELS]
+
+  // Order the keys starting from a rotating offset (spreads first-try load).
+  const n = GEMINI_API_KEYS.length
+  const start = keyRotation++ % n
+  const keys = Array.from({ length: n }, (_, i) => GEMINI_API_KEYS[(start + i) % n])
+
   let lastError = null
 
-  for (let m = 0; m < models.length; m++) {
-    const model = models[m]
-    const maxAttempts = 3
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        return await callModel(model, body, parseFn)
-      } catch (err) {
-        lastError = err
-        if (!err.retryable) throw err // bad key / blocked → stop
-        // 404 (model gone) and 429 (rate limited) won't recover on this model —
-        // jump straight to the next model, which has its own quota bucket.
-        if (err.nextModel) break
-        if (attempt < maxAttempts) await sleep(700 * attempt) // 0.7s, 1.4s (503/500)
+  keyLoop: for (let k = 0; k < keys.length; k++) {
+    const key = keys[k]
+    for (let m = 0; m < models.length; m++) {
+      const model = models[m]
+      const maxAttempts = 3
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          return await callModel(key, model, body, parseFn)
+        } catch (err) {
+          lastError = err
+          // Blocked content etc. → truly fatal, stop everything.
+          if (!err.retryable && !err.nextKey) throw err
+          // Bad / unauthorized key → skip its models, jump to the next key.
+          if (err.nextKey) continue keyLoop
+          // 404 (model gone) / 429 (rate limited) → try the next model, which has
+          // its own quota bucket. When all models on this key are exhausted, the
+          // outer loop moves on to the next KEY (fresh quota).
+          if (err.nextModel) break
+          // 503 / 500 / network / parse hiccup → retry same model with backoff.
+          if (attempt < maxAttempts) await sleep(700 * attempt)
+        }
       }
     }
   }
@@ -118,10 +140,10 @@ async function runGemini(prompt, parseFn) {
   )
 }
 
-async function callModel(model, body, parseFn) {
+async function callModel(key, model, body, parseFn) {
   let res
   try {
-    res = await fetch(ENDPOINT(model), {
+    res = await fetch(ENDPOINT(model, key), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -139,12 +161,17 @@ async function callModel(model, body, parseFn) {
     } catch {}
 
     if (res.status === 400 && /API key/i.test(detail))
-      throw makeError('Invalid API key. Check src/config.js.', { retryable: false })
+      // Invalid key → try the next key rather than failing the whole request.
+      throw makeError('Invalid API key.', {
+        nextKey: true,
+        friendly: 'API key is invalid. Check your VITE_GEMINI_API_KEY configuration.',
+      })
     if (res.status === 403)
-      throw makeError(
-        'This API key is not authorized (check key restrictions in Google Cloud).',
-        { retryable: false }
-      )
+      throw makeError('API key not authorized.', {
+        nextKey: true,
+        friendly:
+          'API key is not authorized (check the key restrictions in Google Cloud).',
+      })
     if (res.status === 429)
       // Rate limited → skip retries on this model, try the next one immediately.
       throw makeError('rate limited', {
@@ -240,13 +267,20 @@ function normalizeType(raw) {
 
 function makeError(
   message,
-  { retryable = false, status = null, friendly = null, nextModel = false } = {}
+  {
+    retryable = false,
+    status = null,
+    friendly = null,
+    nextModel = false,
+    nextKey = false,
+  } = {}
 ) {
   const e = new Error(message)
   e.retryable = retryable
   e.status = status
   e.friendly = friendly
   e.nextModel = nextModel
+  e.nextKey = nextKey
   return e
 }
 

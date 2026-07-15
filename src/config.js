@@ -1,18 +1,27 @@
 // ---------------------------------------------------------------------------
 // CONFIG
 // ---------------------------------------------------------------------------
-// The key is NOT hardcoded here (that would leak it into the public repo).
-// It is supplied via an environment variable:
-//   - Local dev:  put it in a `.env` file (gitignored):  VITE_GEMINI_API_KEY=...
+// Keys are NOT hardcoded here (that would leak them into the public repo).
+// They are supplied via an environment variable:
+//   - Local dev:  put them in a `.env` file (gitignored):  VITE_GEMINI_API_KEY=...
 //   - Deployed:   set a GitHub Actions secret VITE_GEMINI_API_KEY (injected at build)
 //
-// NOTE: because this is a frontend-only app, the key still ends up inside the
-// built JS bundle on the LIVE site and can be read by visitors. Restrict the key
-// in Google AI Studio (HTTP referrer + Generative Language API only), or move it
+// MULTIPLE KEYS: separate them with commas. Each key has its OWN free-tier quota,
+// so when one is rate-limited (429) the app automatically rotates to the next:
+//   VITE_GEMINI_API_KEY=keyA,keyB,keyC
+//
+// NOTE: because this is a frontend-only app, the keys still end up inside the
+// built JS bundle on the LIVE site and can be read by visitors. Restrict each key
+// in Google AI Studio (HTTP referrer + Generative Language API only), or move them
 // behind a serverless proxy. See README.md.
 // ---------------------------------------------------------------------------
 
-export const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || ''
+export const GEMINI_API_KEYS = String(
+  import.meta.env.VITE_GEMINI_API_KEYS || import.meta.env.VITE_GEMINI_API_KEY || ''
+)
+  .split(',')
+  .map((k) => k.trim())
+  .filter(Boolean)
 
 // Free-tier friendly model. "gemini-flash-latest" is a stable alias that always
 // points at Google's current free Flash model, so it won't go stale.
