@@ -104,8 +104,10 @@ async function runGemini(prompt, parseFn) {
       } catch (err) {
         lastError = err
         if (!err.retryable) throw err // bad key / blocked → stop
-        if (err.status === 404) break // model gone → next model
-        if (attempt < maxAttempts) await sleep(700 * attempt) // 0.7s, 1.4s
+        // 404 (model gone) and 429 (rate limited) won't recover on this model —
+        // jump straight to the next model, which has its own quota bucket.
+        if (err.nextModel) break
+        if (attempt < maxAttempts) await sleep(700 * attempt) // 0.7s, 1.4s (503/500)
       }
     }
   }
@@ -143,7 +145,16 @@ async function callModel(model, body, parseFn) {
         'This API key is not authorized (check key restrictions in Google Cloud).',
         { retryable: false }
       )
-    if (res.status === 503 || res.status === 429 || res.status === 500)
+    if (res.status === 429)
+      // Rate limited → skip retries on this model, try the next one immediately.
+      throw makeError('rate limited', {
+        retryable: true,
+        status: 429,
+        nextModel: true,
+        friendly:
+          'You’ve hit the free usage limit for the moment. Please wait ~30 seconds and try again.',
+      })
+    if (res.status === 503 || res.status === 500)
       throw makeError('busy', {
         retryable: true,
         status: res.status,
@@ -151,7 +162,7 @@ async function callModel(model, body, parseFn) {
           'The service is busy right now. Please try again in a few seconds.',
       })
     if (res.status === 404)
-      throw makeError('model missing', { retryable: true, status: 404 })
+      throw makeError('model missing', { retryable: true, status: 404, nextModel: true })
 
     throw makeError(detail || `Request failed (HTTP ${res.status}).`, {
       retryable: false,
@@ -227,11 +238,15 @@ function normalizeType(raw) {
 // HELPERS
 // ---------------------------------------------------------------------------
 
-function makeError(message, { retryable = false, status = null, friendly = null } = {}) {
+function makeError(
+  message,
+  { retryable = false, status = null, friendly = null, nextModel = false } = {}
+) {
   const e = new Error(message)
   e.retryable = retryable
   e.status = status
   e.friendly = friendly
+  e.nextModel = nextModel
   return e
 }
 
